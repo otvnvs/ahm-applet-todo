@@ -1,10 +1,22 @@
 <template>
   <div class="todo-container">
-    <header class="todo-header">
+<header class="todo-header">
+  <div class="header-main-row">
+    <div class="header-text-group">
       <h1>Task Manager</h1>
       <p class="todo-stats">{{remainingTasks}} of {{todos.length}} remaining</p>
-    </header>
-
+    </div>
+    <div class="header-actions">
+      <button @click="saveToDisk" class="backup-btn">Backup</button>
+      <button @click="restoreFromDisk" class="restore-btn">Restore</button>
+    </div>
+  </div>
+  
+  <!-- Inline feedback status notifications -->
+  <p v-if="diskStatus.message" :class="['status-msg', diskStatus.type]">
+    {{ diskStatus.message }}
+  </p>
+</header>
     <!-- Search Bar -->
     <div class="search-container">
       <input 
@@ -101,22 +113,17 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 
-// Base State
 const todos = ref([])
 const newTodoText = ref('')
 const currentFilter = ref('all')
-
-// Search & Edit State
 const searchQuery = ref('')
 const editingId = ref(null)
 const editText = ref('')
+const vFocus = { mounted: (el) => el.focus() }
 
-// Custom directive to automatically focus the edit input field
-const vFocus = {
-  mounted: (el) => el.focus()
-}
+// Disk status notifications for the UI
+const diskStatus = ref({ type: '', message: '' })
 
-// Lifecycle & Persistence
 onMounted(() => {
   const savedTodos = localStorage.getItem('vue-todos')
   if (savedTodos) {
@@ -128,6 +135,7 @@ onMounted(() => {
   }
 })
 
+// Auto-saves to LocalStorage whenever changes happen
 const saveTodos = () => {
   localStorage.setItem('vue-todos', JSON.stringify(todos.value))
 }
@@ -136,7 +144,95 @@ watch(todos, () => {
   saveTodos()
 }, { deep: true })
 
-// Core Mutation Actions
+/**
+ * Persists the current local todo tracking array to the device disk.
+ * Matches the required request structure by sending raw text within the body payload.
+ */
+const saveToDisk = async () => {
+  try {
+    diskStatus.value = { type: 'info', message: 'Saving backup to disk...' }
+    
+    // 1. Target path destination
+    const targetFile = 'Download/vue-todos.json'
+    
+    // 2. Convert state array to raw text string format
+    const contentPayload = JSON.stringify(todos.value)
+    
+    // 3. Build endpoint by URL-encoding the query parameter path string
+    const url = `/api/fs/write?path=${encodeURIComponent(targetFile)}`
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      body: contentPayload
+    })
+
+    if (!response.ok) {
+      throw new Error(`Server responded with status: ${response.status}`)
+    }
+
+    const data = await response.json()
+    if (data.status === 'success') {
+      diskStatus.value = { type: 'success', message: 'Backup successfully written to Download/vue-todos.json!' }
+    } else {
+      throw new Error(data.message || 'Unknown server storage failure')
+    }
+  } catch (error) {
+    console.error('Failed disk synchronization:', error)
+    diskStatus.value = { type: 'error', message: `Disk save failed: ${error.message}` }
+  } finally {
+    // Clear notification toast after a 4-second timeout
+    setTimeout(() => {
+      diskStatus.value = { type: '', message: '' }
+    }, 4000)
+  }
+}
+
+/**
+ * Restores the application state from the local disk backup file.
+ * Hits GET /api/fs/read and reads raw text data.
+ */
+const restoreFromDisk = async () => {
+  try {
+    diskStatus.value = { type: 'info', message: 'Reading backup file from disk...' }
+    
+    const response = await fetch('/api/fs/read?path=Download/vue-todos.json')
+    
+    // File system missing error protection
+    if (response.status === 404) {
+      throw new Error('No backup file found at Download/vue-todos.json')
+    }
+    
+    if (!response.ok) {
+      throw new Error(`Failed to load backup file (Status ${response.status})`)
+    }
+
+    // Read the raw text response body directly
+    const rawText = await response.text()
+    
+    if (!rawText.trim()) {
+      throw new Error('Backup file data payload is completely empty')
+    }
+
+    const importedTodos = JSON.parse(rawText)
+    
+    // Safety verification check on structural layout
+    if (Array.isArray(importedTodos)) {
+      todos.value = importedTodos
+      saveTodos() // Update localstorage sync
+      diskStatus.value = { type: 'success', message: `Successfully restored ${importedTodos.length} tasks!` }
+    } else {
+      throw new Error('Invalid JSON structural data format inside file backup.')
+    }
+  } catch (error) {
+    console.error('Failed file restoration:', error)
+    diskStatus.value = { type: 'error', message: `Restore failed: ${error.message}` }
+  } finally {
+    setTimeout(() => {
+      diskStatus.value = { type: '', message: '' }
+    }, 4000)
+  }
+}
+
 const addTodo = () => {
   if (!newTodoText.value) return
   todos.value.unshift({
@@ -152,7 +248,6 @@ const removeTodo = (id) => {
   if (editingId.value === id) cancelEdit()
 }
 
-// Inline Editing Actions
 const startEdit = (todo) => {
   editingId.value = todo.id
   editText.value = todo.text
@@ -173,26 +268,21 @@ const cancelEdit = () => {
   editText.value = ''
 }
 
-// Computed Calculations
 const remainingTasks = computed(() => {
   return todos.value.filter(todo => !todo.completed).length
 })
 
 const filteredTodos = computed(() => {
-  // First filter by status
   let result = todos.value
   if (currentFilter.value === 'active') {
     result = todos.value.filter(todo => !todo.completed)
   } else if (currentFilter.value === 'completed') {
     result = todos.value.filter(todo => todo.completed)
   }
-
-  // Then filter by search query matching task text
   if (searchQuery.value.trim()) {
     const query = searchQuery.value.toLowerCase().trim()
     result = result.filter(todo => todo.text.toLowerCase().includes(query))
   }
-
   return result
 })
 
@@ -549,5 +639,141 @@ const emptyStateMessage = computed(() => {
     padding: 0.75rem;
   }
 }
+
+/* -------------------------------------------------------------------------------- */
+/* Backup */
+/* -------------------------------------------------------------------------------- */
+.todo-header {
+  margin-bottom: 1.5rem;
+  position: relative;
+}
+
+/* Align text group left, push backup button to the absolute right side */
+.header-main-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+/* Ensure headings stay centered or cleanly aligned left depending on layout preference */
+.header-text-group {
+  text-align: left;
+}
+
+.todo-header h1 {
+  margin: 0 0 0.2rem 0;
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.todo-stats {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+/* Mirrors the exact styling metrics of the existing form add button */
+.backup-btn {
+  padding: 0.8rem 1.5rem;
+  background-color: var(--accent);
+  color: #000000;
+  border: none;
+  border-radius: var(--border-radius);
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.backup-btn:hover {
+  background-color: var(--accent-hover);
+}
+
+/* Inline feedback message positioning */
+.status-msg {
+  font-size: 0.85rem;
+  margin: 0.75rem 0 0 0;
+  padding: 0.4rem;
+  border-radius: 6px;
+  text-align: center;
+}
+.status-msg.success { color: var(--success); background-color: rgba(3, 218, 198, 0.1); }
+.status-msg.error { color: var(--danger); background-color: rgba(207, 102, 121, 0.1); }
+.status-msg.info { color: var(--text-muted); background-color: rgba(255, 255, 255, 0.05); }
+.header-main-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 1rem;
+}
+
+.header-text-group {
+  text-align: left;
+  flex: 1;
+}
+
+/* Button Layout Group */
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* Shared dimensions that match the Add button exactly */
+.backup-btn,
+.restore-btn {
+  padding: 0.8rem 1.2rem; /* Adjusted horizontal padding slightly to fit side-by-side cleanly */
+  border-radius: var(--border-radius);
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition);
+  box-sizing: border-box;
+}
+
+/* Solid Fill Primary Accent style */
+.backup-btn {
+  background-color: var(--accent);
+  color: #000000;
+  border: none;
+}
+
+.backup-btn:hover {
+  background-color: var(--accent-hover);
+}
+
+/* Outline style to create clean visual balance */
+.restore-btn {
+  background-color: transparent;
+  border: 2px solid var(--accent);
+  color: var(--accent);
+}
+
+.restore-btn:hover {
+  background-color: var(--accent);
+  color: #000000;
+}
+
+/* Responsive adjustment for extra narrow smartphone viewports */
+@media(max-width: 400px) {
+  .header-main-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .header-actions {
+    width: 100%;
+    margin-top: 0.5rem;
+  }
+  .backup-btn, .restore-btn {
+    flex: 1;
+    text-align: center;
+  }
+}
+
+
 </style>
 
