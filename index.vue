@@ -1,779 +1,436 @@
 <template>
-  <div class="todo-container">
-<header class="todo-header">
-  <div class="header-main-row">
-    <div class="header-text-group">
-      <h1>Task Manager</h1>
-      <p class="todo-stats">{{remainingTasks}} of {{todos.length}} remaining</p>
-    </div>
-    <div class="header-actions">
-      <button @click="saveToDisk" class="backup-btn">Backup</button>
-      <button @click="restoreFromDisk" class="restore-btn">Restore</button>
-    </div>
-  </div>
-  
-  <!-- Inline feedback status notifications -->
-  <p v-if="diskStatus.message" :class="['status-msg', diskStatus.type]">
-    {{ diskStatus.message }}
-  </p>
-</header>
-    <!-- Search Bar -->
-    <div class="search-container">
-      <input 
-        v-model="searchQuery" 
-        type="text" 
-        placeholder="Search tasks..." 
-        aria-label="Search tasks"
-        class="search-input"
-      />
-      <button 
-        v-if="searchQuery" 
-        @click="searchQuery = ''" 
-        class="clear-search-btn"
-        title="Clear search"
-      >
-        &times;
-      </button>
-    </div>
+  <div class="game-container">
+    <!-- Header Controls -->
+    <header class="game-header">
+      <div class="mode-selector">
+        <button 
+          :class="{ active: interactionMode === 'raise' }" 
+          @click="interactionMode = 'raise'"
+        >
+          ▲ Raise
+        </button>
+        <button 
+          :class="{ active: interactionMode === 'lower' }" 
+          @click="interactionMode = 'lower'"
+        >
+          ▼ Lower
+        </button>
+        <button 
+          :class="{ active: interactionMode === 'rotate' }" 
+          @click="interactionMode = 'rotate'"
+        >
+          ↻ Rotate
+        </button>
+      </div>
+    </header>
 
-    <!-- Input Form -->
-    <form @submit.prevent="addTodo" class="todo-form">
-      <input 
-        v-model.trim="newTodoText" 
-        type="text" 
-        placeholder="Add a new task..." 
-        maxlength="100" 
-        aria-label="New todo text"
-      />
-      <button type="submit" :disabled="!newTodoText">Add</button>
-    </form>
-
-    <!-- Filters -->
-    <div class="todo-filters" v-if="todos.length > 0">
-      <button 
-        v-for="filter in ['all', 'active', 'completed']" 
-        :key="filter" 
-        :class="{ active: currentFilter === filter }" 
-        @click="currentFilter = filter"
-      >
-        {{filter}}
-      </button>
+    <!-- Canvas Viewport Container -->
+    <div class="viewport-wrapper" ref="wrapper">
+      <canvas 
+        ref="landscapeCanvas"
+        @touchstart.passive="handleTouchStart"
+        @touchmove.passive="handleTouchMove"
+        @touchend="handleTouchEnd"
+        @mousedown="handleMouseDown"
+        @mousemove="handleMouseMove"
+        @mouseup="handleMouseUp"
+      ></canvas>
     </div>
 
-    <!-- Todo List -->
-    <transition-group name="list" tag="ul" class="todo-list">
-      <li 
-        v-for="todo in filteredTodos" 
-        :key="todo.id" 
-        :class="{ completed: todo.completed, editing: editingId === todo.id }" 
-        class="todo-item"
-      >
-        <!-- Inline Edit Mode -->
-        <div v-if="editingId === todo.id" class="edit-mode-container">
-          <input 
-            v-model.trim="editText" 
-            type="text" 
-            maxlength="100"
-            class="edit-input"
-            @keyup.enter="saveEdit(todo.id)"
-            @keyup.esc="cancelEdit"
-            v-focus
-          />
-          <div class="edit-actions">
-            <button @click="saveEdit(todo.id)" class="save-btn" :disabled="!editText">Save</button>
-            <button @click="cancelEdit" class="cancel-btn">Cancel</button>
-          </div>
-        </div>
-
-        <!-- Normal Display Mode -->
-        <template v-else>
-          <label class="todo-checkbox-label">
-            <input 
-              type="checkbox" 
-              v-model="todo.completed" 
-              @change="saveTodos"
-            />
-            <span class="custom-checkbox"></span>
-            <span class="todo-text" @dblclick="startEdit(todo)">{{todo.text}}</span>
-          </label>
-          <div class="item-actions">
-            <button @click="startEdit(todo)" class="edit-btn" aria-label="Edit task">✎</button>
-            <button @click="removeTodo(todo.id)" class="delete-btn" aria-label="Delete task">&times;</button>
-          </div>
-        </template>
-      </li>
-    </transition-group>
-
-    <!-- Empty State -->
-    <div v-if="filteredTodos.length === 0" class="empty-state">
-      <p>{{emptyStateMessage}}</p>
-    </div>
+    <!-- Mobile Footer Info -->
+    <footer class="game-footer">
+      <p v-if="interactionMode === 'rotate'">Drag to rotate view</p>
+      <p v-else>Tap land to alter the biomes</p>
+    </footer>
   </div>
 </template>
+
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
-const todos = ref([])
-const newTodoText = ref('')
-const currentFilter = ref('all')
-const searchQuery = ref('')
-const editingId = ref(null)
-const editText = ref('')
-const vFocus = { mounted: (el) => el.focus() }
+// Canvas & Layout Refs
+const landscapeCanvas = ref(null)
+const wrapper = ref(null)
+let ctx = null
+let animationFrameId = null
 
-// Disk status notifications for the UI
-const diskStatus = ref({ type: '', message: '' })
+// Game/Engine State
+const GRID_SIZE = 14 // 14x14 grid
+const interactionMode = ref('raise') 
+const angle = ref(0.75) // Camera rotation angle
 
-onMounted(() => {
-  const savedTodos = localStorage.getItem('vue-todos')
-  if (savedTodos) {
-    try {
-      todos.value = JSON.parse(savedTodos)
-    } catch (e) {
-      localStorage.removeItem('vue-todos')
-    }
-  }
-})
+// Input Tracking
+const isInteracting = ref(false)
+let lastInputX = 0
+let lastInputY = 0
 
-// Auto-saves to LocalStorage whenever changes happen
-const saveTodos = () => {
-  localStorage.setItem('vue-todos', JSON.stringify(todos.value))
-}
+// SEA LEVEL DEFINITION (Anything below this is water)
+const SEA_LEVEL = 5
 
-watch(todos, () => {
-  saveTodos()
-}, { deep: true })
-
-/**
- * Persists the current local todo tracking array to the device disk.
- * Matches the required request structure by sending raw text within the body payload.
- */
-const saveToDisk = async () => {
-  try {
-    diskStatus.value = { type: 'info', message: 'Saving backup to disk...' }
-    
-    // 1. Target path destination
-    const targetFile = 'Download/vue-todos.json'
-    
-    // 2. Convert state array to raw text string format
-    const contentPayload = JSON.stringify(todos.value)
-    
-    // 3. Build endpoint by URL-encoding the query parameter path string
-    const url = `/api/fs/write?path=${encodeURIComponent(targetFile)}`
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      body: contentPayload
-    })
-
-    if (!response.ok) {
-      throw new Error(`Server responded with status: ${response.status}`)
-    }
-
-    const data = await response.json()
-    if (data.status === 'success') {
-      diskStatus.value = { type: 'success', message: 'Backup successfully written to Download/vue-todos.json!' }
+// Generate the initial landscape height map
+const heightMap = ref([])
+for (let x = 0; x <= GRID_SIZE; x++) {
+  heightMap.value[x] = []
+  for (let y = 0; y <= GRID_SIZE; y++) {
+    // Generate a central landmass island to start
+    const distanceFromCenter = Math.hypot(x - GRID_SIZE/2, y - GRID_SIZE/2)
+    if (distanceFromCenter < 4) {
+      heightMap.value[x][y] = 25 // High grass/mountain peak
+    } else if (distanceFromCenter < 6) {
+      heightMap.value[x][y] = 12 // Flat grass plain
     } else {
-      throw new Error(data.message || 'Unknown server storage failure')
+      heightMap.value[x][y] = 0 // Submerged water trench
     }
-  } catch (error) {
-    console.error('Failed disk synchronization:', error)
-    diskStatus.value = { type: 'error', message: `Disk save failed: ${error.message}` }
-  } finally {
-    // Clear notification toast after a 4-second timeout
-    setTimeout(() => {
-      diskStatus.value = { type: '', message: '' }
-    }, 4000)
   }
 }
 
-/**
- * Restores the application state from the local disk backup file.
- * Hits GET /api/fs/read and reads raw text data.
- */
-const restoreFromDisk = async () => {
-  try {
-    diskStatus.value = { type: 'info', message: 'Reading backup file from disk...' }
-    
-    const response = await fetch('/api/fs/read?path=Download/vue-todos.json')
-    
-    // File system missing error protection
-    if (response.status === 404) {
-      throw new Error('No backup file found at Download/vue-todos.json')
-    }
-    
-    if (!response.ok) {
-      throw new Error(`Failed to load backup file (Status ${response.status})`)
-    }
+// Isometric Projection Math
+const project = (x, y, z, width, height) => {
+  const cx = width / 2
+  const cy = height / 1.9 // Slightly lower down center
+  const scale = Math.min(width, height) / (GRID_SIZE * 1.6)
+  
+  const halfGrid = GRID_SIZE / 2
+  const rx = (x - halfGrid) * Math.cos(angle.value) - (y - halfGrid) * Math.sin(angle.value)
+  const ry = (x - halfGrid) * Math.sin(angle.value) + (y - halfGrid) * Math.cos(angle.value)
+  
+  const screenX = cx + (rx - ry) * scale
+  // We clamp visual rendering of underwater coordinates to look like a flat ocean floor bed
+  const renderedZ = Math.max(SEA_LEVEL, z)
+  const screenY = cy + (rx + ry) * (scale * 0.5) - renderedZ
+  
+  return { x: screenX, y: screenY }
+}
 
-    // Read the raw text response body directly
-    const rawText = await response.text()
-    
-    if (!rawText.trim()) {
-      throw new Error('Backup file data payload is completely empty')
+// Main Render Loop
+const drawLandscape = () => {
+  if (!landscapeCanvas.value || !ctx) return
+  
+  const canvas = landscapeCanvas.value
+  const w = canvas.width / (window.devicePixelRatio || 1)
+  const h = canvas.height / (window.devicePixelRatio || 1)
+  
+  // Clean background frame
+  ctx.fillStyle = '#0b0f19'
+  ctx.fillRect(0, 0, w, h)
+  
+  // Render grid boxes back-to-front painter algorithm
+  for (let x = 0; x < GRID_SIZE; x++) {
+    for (let y = 0; y < GRID_SIZE; y++) {
+      // 1. Fetch Elevation values for the 4 corners of the quad mesh
+      const h1 = heightMap.value[x][y]
+      const h2 = heightMap.value[x + 1][y]
+      const h3 = heightMap.value[x + 1][y + 1]
+      const h4 = heightMap.value[x][y + 1]
+      
+      const avgHeight = (h1 + h2 + h3 + h4) / 4
+      
+      // Calculate projected screen pixel dots
+      const p1 = project(x, y, h1, w, h)
+      const p2 = project(x + 1, y, h2, w, h)
+      const p3 = project(x + 1, y + 1, h3, w, h)
+      const p4 = project(x, y + 1, h4, w, h)
+      
+      ctx.beginPath()
+      ctx.moveTo(p1.x, p1.y)
+      ctx.lineTo(p2.x, p2.y)
+      ctx.lineTo(p3.x, p3.y)
+      ctx.lineTo(p4.x, p4.y)
+      ctx.closePath()
+      
+      // 2. BIOME COLOR LOGIC (Dynamic thematic mapping based on height)
+      let fillStyle = ''
+      let strokeStyle = ''
+      
+      if (avgHeight <= SEA_LEVEL) {
+        // Deep Ocean
+        fillStyle = '#112244' 
+        strokeStyle = '#1d3557'
+      } else if (avgHeight <= SEA_LEVEL + 4) {
+        // Sand Beaches
+        fillStyle = '#c5a059' 
+        strokeStyle = '#d4af37'
+      } else if (avgHeight <= SEA_LEVEL + 24) {
+        // Fertile Grass Plain
+        fillStyle = '#1e4620' 
+        strokeStyle = '#2e6f40'
+      } else if (avgHeight <= SEA_LEVEL + 45) {
+        // High Mountain rock
+        fillStyle = '#4a4e69' 
+        strokeStyle = '#9a8c98'
+      } else {
+        // Snowy Peak summits
+        fillStyle = '#f2e9e4' 
+        strokeStyle = '#ffffff'
+      }
+      
+      ctx.fillStyle = fillStyle
+      ctx.fill()
+      
+      ctx.strokeStyle = strokeStyle
+      ctx.lineWidth = 1
+      ctx.stroke()
     }
+  }
+  
+  animationFrameId = requestAnimationFrame(drawLandscape)
+}
 
-    const importedTodos = JSON.parse(rawText)
-    
-    // Safety verification check on structural layout
-    if (Array.isArray(importedTodos)) {
-      todos.value = importedTodos
-      saveTodos() // Update localstorage sync
-      diskStatus.value = { type: 'success', message: `Successfully restored ${importedTodos.length} tasks!` }
-    } else {
-      throw new Error('Invalid JSON structural data format inside file backup.')
+// Modify point height along with immediate neighbors for smoother sloped terrain hills
+const alterTerrainSmoothly = (targetX, targetY, amount) => {
+  for (let x = 0; x <= GRID_SIZE; x++) {
+    for (let y = 0; y <= GRID_SIZE; y++) {
+      const distance = Math.hypot(x - targetX, y - targetY)
+      
+      // Falloff modifier radius: 100% impact at tap point, drops off up to 2 units away
+      if (distance < 2.5) {
+        const falloff = 1 - (distance / 2.5)
+        const addition = amount * falloff
+        
+        heightMap.value[x][y] = Math.max(0, Math.min(75, heightMap.value[x][y] + addition))
+      }
     }
-  } catch (error) {
-    console.error('Failed file restoration:', error)
-    diskStatus.value = { type: 'error', message: `Restore failed: ${error.message}` }
-  } finally {
-    setTimeout(() => {
-      diskStatus.value = { type: '', message: '' }
-    }, 4000)
   }
 }
 
-const addTodo = () => {
-  if (!newTodoText.value) return
-  todos.value.unshift({
-    id: Date.now(),
-    text: newTodoText.value,
-    completed: false
-  })
-  newTodoText.value = ''
-}
-
-const removeTodo = (id) => {
-  todos.value = todos.value.filter(todo => todo.id !== id)
-  if (editingId.value === id) cancelEdit()
-}
-
-const startEdit = (todo) => {
-  editingId.value = todo.id
-  editText.value = todo.text
-}
-
-const saveEdit = (id) => {
-  if (!editText.value) return
-  const todo = todos.value.find(t => t.id === id)
-  if (todo) {
-    todo.text = editText.value
+// Input Core Controllers
+const processInputMove = (currentX, currentY) => {
+  if (!isInteracting.value) return
+  const deltaX = currentX - lastInputX
+  
+  if (interactionMode.value === 'rotate') {
+    angle.value += deltaX * 0.007
   }
-  editingId.value = null
-  editText.value = ''
+  
+  lastInputX = currentX
+  lastInputY = currentY
 }
 
-const cancelEdit = () => {
-  editingId.value = null
-  editText.value = ''
+const processInputDown = (clientX, clientY) => {
+  if (!landscapeCanvas.value) return
+  isInteracting.value = true
+  
+  const rect = landscapeCanvas.value.getBoundingClientRect()
+  const canvasX = clientX - rect.left
+  const canvasY = clientY - rect.top
+  
+  lastInputX = canvasX
+  lastInputY = canvasY
+  
+  if (interactionMode.value === 'raise' || interactionMode.value === 'lower') {
+    let closestX = -1
+    let closestY = -1
+    let minDistance = 35 
+    
+    const w = landscapeCanvas.value.width / (window.devicePixelRatio || 1)
+    const h = landscapeCanvas.value.height / (window.devicePixelRatio || 1)
+    
+    for (let x = 0; x <= GRID_SIZE; x++) {
+      for (let y = 0; y <= GRID_SIZE; y++) {
+        // Calculate point relative positions
+        const p = project(x, y, heightMap.value[x][y], w, h)
+        const dist = Math.hypot(p.x - canvasX, p.y - canvasY)
+        
+        if (dist < minDistance) {
+          minDistance = dist
+          closestX = x
+          closestY = y
+        }
+      }
+    }
+    
+    if (closestX !== -1 && closestY !== -1) {
+      const power = interactionMode.value === 'raise' ? 12 : -12
+      alterTerrainSmoothly(closestX, closestY, power)
+    }
+  }
 }
 
-const remainingTasks = computed(() => {
-  return todos.value.filter(todo => !todo.completed).length
+// Mobile Extraction Maps
+const handleTouchStart = (e) => {
+  if (e.touches && e.touches.length === 1) {
+    processInputDown(e.touches[0].clientX, e.touches[0].clientY)
+  }
+}
+const handleTouchMove = (e) => {
+  if (e.touches && e.touches.length === 1 && landscapeCanvas.value) {
+    const rect = landscapeCanvas.value.getBoundingClientRect()
+    processInputMove(e.touches[0].clientX - rect.left, e.touches[0].clientY - rect.top)
+  }
+}
+const handleTouchEnd = () => { isInteracting.value = false }
+
+// Desktop Mouse Wrappers
+const handleMouseDown = (e) => processInputDown(e.clientX, e.clientY)
+const handleMouseMove = (e) => {
+  if (landscapeCanvas.value) {
+    const rect = landscapeCanvas.value.getBoundingClientRect()
+    processInputMove(e.clientX - rect.left, e.clientY - rect.top)
+  }
+}
+const handleMouseUp = () => { isInteracting.value = false }
+
+// Dynamic Canvas Auto Sizing Adjuster
+const resizeCanvas = () => {
+  if (!landscapeCanvas.value || !wrapper.value) return
+  const canvas = landscapeCanvas.value
+  const dpr = window.devicePixelRatio || 1
+  
+  const targetWidth = wrapper.value.offsetWidth || window.innerWidth
+  const targetHeight = wrapper.value.offsetHeight || (window.innerHeight - 140)
+  
+  canvas.width = targetWidth * dpr
+  canvas.height = targetHeight * dpr
+  canvas.style.width = `${targetWidth}px`
+  canvas.style.height = `${targetHeight}px`
+  
+  ctx = canvas.getContext('2d')
+  ctx.scale(dpr, dpr)
+}
+
+onMounted(async () => {
+  await nextTick()
+  setTimeout(() => {
+    resizeCanvas()
+    window.addEventListener('resize', resizeCanvas)
+    drawLandscape()
+  }, 100)
 })
 
-const filteredTodos = computed(() => {
-  let result = todos.value
-  if (currentFilter.value === 'active') {
-    result = todos.value.filter(todo => !todo.completed)
-  } else if (currentFilter.value === 'completed') {
-    result = todos.value.filter(todo => todo.completed)
-  }
-  if (searchQuery.value.trim()) {
-    const query = searchQuery.value.toLowerCase().trim()
-    result = result.filter(todo => todo.text.toLowerCase().includes(query))
-  }
-  return result
-})
-
-const emptyStateMessage = computed(() => {
-  if (searchQuery.value.trim() && filteredTodos.value.length === 0) {
-    return 'No matching tasks found for your search.'
-  }
-  if (todos.value.length === 0) return 'No tasks yet. Add one above!'
-  if (currentFilter.value === 'active') return 'No active tasks!'
-  if (currentFilter.value === 'completed') return 'No completed tasks yet!'
-  return 'No tasks found.'
+onUnmounted(() => {
+  window.removeEventListener('resize', resizeCanvas)
+  cancelAnimationFrame(animationFrameId)
 })
 </script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 <style scoped>
-.todo-container {
-  --bg-primary: #121212;
-  --bg-surface: #1e1e1e;
-  --bg-input: #2d2d2d;
-  --text-primary: #e0e0e0;
-  --text-muted: #a0a0a0;
-  --accent: #bb86fc;
-  --accent-hover: #9a66d4;
-  --danger: #cf6679;
-  --success: #03dac6;
-  --border-radius: 12px;
-  --transition: all 0.2s ease;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  max-width: 500px;
-  margin: 2rem auto;
-  padding: 1.5rem;
-  background-color: var(--bg-surface);
-  color: var(--text-primary);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-  border-radius: var(--border-radius);
-  box-sizing: border-box;
+/* Container Match */
+.game-container {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background-color: #0b0b0b; /* Pure, deep pitch black background */
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.todo-header {
-  margin-bottom: 1.5rem;
+/* System Header Layout */
+.game-header {
+  flex-shrink: 0;
+  padding: 40px 24px 16px 24px; /* Generous top padding mimicking native status bar spacing */
   text-align: center;
 }
 
-.todo-header h1 {
-  margin: 0 0 0.5rem 0;
-  font-size: 1.8rem;
+.game-header h1 {
+  font-size: 1.75rem; /* Large, bold typography matching the 'About' header */
   font-weight: 700;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px 0;
+  color: #ffffff;
 }
 
-.todo-stats {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9rem;
+/* Sub-heading text styling for Version details if you choose to add them */
+.game-header::after {
+  display: block;
+  font-size: 0.95rem;
+  color: #666666; /* Muted gray text */
+  margin-top: 4px;
+  margin-bottom: 24px;
 }
 
-/* Search Box Styling */
-.search-container {
-  position: relative;
-  margin-bottom: 1rem;
+/* Mode Selector matching the floating UI panel block */
+.mode-selector {
+  display: flex;
+  flex-direction: column; /* Stacks controls uniformly like list items */
+  background: #121212; /* Distinct dark gray nested sheet background */
+  border-radius: 16px; /* Smooth, rounded modern mobile corners */
+  padding: 4px;
+  margin: 0 auto;
+  width: 90%;
+  max-width: 400px;
 }
 
-.search-input {
+.mode-selector button {
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  padding: 18px 16px; /* Expanded touch targets matching list elements */
+  font-size: 1rem;
+  font-weight: 400;
+  text-align: left; /* Clean left-aligned configuration */
   width: 100%;
-  padding: 0.6rem 2.5rem 0.6rem 1rem;
-  background-color: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--bg-input);
-  border-radius: 8px;
-  color: var(--text-primary);
-  font-size: 0.9rem;
-  outline: none;
-  box-sizing: border-box;
-  transition: var(--transition);
-}
-
-.search-input:focus {
-  border-color: var(--accent);
-  background-color: var(--bg-input);
-}
-
-.clear-search-btn {
-  position: absolute;
-  right: 0.5rem;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 1.2rem;
+  border-bottom: 1px solid #1c1c1c; /* Soft separation border rows */
+  touch-action: manipulation;
   cursor: pointer;
-}
-
-.clear-search-btn:hover {
-  color: var(--text-primary);
-}
-
-.todo-form {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
-}
-
-.todo-form input {
-  flex: 1;
-  padding: 0.8rem 1rem;
-  background-color: var(--bg-input);
-  border: 1px solid transparent;
-  border-radius: var(--border-radius);
-  color: var(--text-primary);
-  font-size: 1rem;
-  outline: none;
-  transition: var(--transition);
-}
-
-.todo-form input:focus {
-  border-color: var(--accent);
-}
-
-.todo-form button {
-  padding: 0.8rem 1.5rem;
-  background-color: var(--accent);
-  color: #000000;
-  border: none;
-  border-radius: var(--border-radius);
-  font-weight: 600;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.todo-form button:hover:not(:disabled) {
-  background-color: var(--accent-hover);
-}
-
-.todo-form button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.todo-filters {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.todo-filters button {
-  flex: 1;
-  padding: 0.5rem;
-  background: none;
-  border: 1px solid var(--bg-input);
-  border-radius: 6px;
-  color: var(--text-muted);
-  text-transform: capitalize;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.todo-filters button.active,
-.todo-filters button:hover {
-  background-color: var(--bg-input);
-  color: var(--text-primary);
-  border-color: var(--text-muted);
-}
-
-.todo-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.todo-item {
-  display: flex;
-  align-items: center;
   justify-content: space-between;
-  padding: 0.8rem 1rem;
-  background-color: var(--bg-input);
-  border-radius: var(--border-radius);
-  margin-bottom: 0.5rem;
-  transition: var(--transition);
 }
 
-.todo-item.completed {
-  opacity: 0.6;
+/* Remove border line rule on the final item row inside the menu block */
+.mode-selector button:last-child {
+  border-bottom: none;
 }
 
-.todo-checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  cursor: pointer;
+/* Highlighted state using clean contrast accents */
+.mode-selector button.active {
+  color: #4ade80; /* Subtle text accent or change background if preferred */
+  font-weight: 600;
+}
+
+/* Clean Canvas Window Integration */
+.viewport-wrapper {
+  flex-grow: 1;
+  flex-shrink: 1;
+  min-height: 200px;
+  position: relative;
+  margin: 20px auto;
+  width: 90%;
+  max-width: 400px;
+  background-color: #121212;
+  border-radius: 16px; /* Encapsulates the canvas field inside an identical rounded card wrapper */
+  overflow: hidden;
+}
+
+canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
-  position: relative;
-}
-
-.todo-checkbox-label input {
-  position: absolute;
-  opacity: 0;
-  cursor: pointer;
-  height: 0;
-  width: 0;
-}
-
-.custom-checkbox {
-  height: 20px;
-  width: 20px;
-  background-color: transparent;
-  border: 2px solid var(--text-muted);
-  border-radius: 6px;
-  flex-shrink: 0;
-  position: relative;
-  transition: var(--transition);
-}
-
-.todo-checkbox-label input:checked ~ .custom-checkbox {
-  background-color: var(--accent);
-  border-color: var(--accent);
-}
-
-.custom-checkbox:after {
-  content: "";
-  position: absolute;
-  display: none;
-  left: 6px;
-  top: 2px;
-  width: 5px;
-  height: 10px;
-  border: solid #000;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
-
-.todo-checkbox-label input:checked ~ .custom-checkbox:after {
+  height: 100%;
   display: block;
 }
 
-.todo-text {
-  font-size: 1rem;
-  word-break: break-word;
-  user-select: none;
-  transition: var(--transition);
-}
-
-.todo-item.completed .todo-text {
-  text-decoration: line-through;
-  color: var(--text-muted);
-}
-
-/* Edit Form Mode Inside Lists */
-.edit-mode-container {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 100%;
-}
-
-.edit-input {
-  width: 100%;
-  padding: 0.5rem;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  color: var(--text-primary);
-  font-size: 1rem;
-  outline: none;
-  box-sizing: border-box;
-}
-
-.edit-actions {
-  display: flex;
-  gap: 0.5rem;
-  justify-content: flex-end;
-}
-
-.edit-actions button {
-  padding: 0.3rem 0.8rem;
-  border: none;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.save-btn {
-  background-color: var(--success);
-  color: #000;
-}
-
-.cancel-btn {
-  background-color: transparent;
-  border: 1px solid var(--text-muted) !important;
-  color: var(--text-muted);
-}
-
-.item-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.edit-btn, .delete-btn {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 0 0.5rem;
-  line-height: 1;
-  transition: var(--transition);
-}
-
-.edit-btn {
-  font-size: 1.1rem;
-}
-
-.delete-btn {
-  font-size: 1.5rem;
-}
-
-.edit-btn:hover {
-  color: var(--accent);
-}
-
-.delete-btn:hover {
-  color: var(--danger);
-}
-
-.empty-state {
+/* System Footer Layout matching the copyright imprint string position */
+.game-footer {
+  flex-shrink: 0;
+  padding: 24px;
   text-align: center;
-  color: var(--text-muted);
-  padding: 2rem 0;
-  font-style: italic;
 }
 
-.list-enter-active, .list-leave-active {
-  transition: all 0.3s ease;
-}
-
-.list-enter-from, .list-leave-to {
-  opacity: 0;
-  transform: translateX(-20px);
-}
-
-@media (max-width: 480px) {
-  .todo-container {
-    margin: 0;
-    max-width: 100%;
-    min-height: 100vh;
-    border-radius: 0;
-    padding: 1rem;
-  }
-  .todo-header h1 {
-    font-size: 1.6rem;
-  }
-  .todo-form input, .todo-form button {
-    padding: 0.75rem;
-  }
-}
-
-/* -------------------------------------------------------------------------------- */
-/* Backup */
-/* -------------------------------------------------------------------------------- */
-.todo-header {
-  margin-bottom: 1.5rem;
-  position: relative;
-}
-
-/* Align text group left, push backup button to the absolute right side */
-.header-main-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-}
-
-/* Ensure headings stay centered or cleanly aligned left depending on layout preference */
-.header-text-group {
-  text-align: left;
-}
-
-.todo-header h1 {
-  margin: 0 0 0.2rem 0;
-  font-size: 1.8rem;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-}
-
-.todo-stats {
+.game-footer p {
+  font-size: 0.8rem;
+  color: #444444; /* Low contrast deep muted gray text */
   margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9rem;
+  letter-spacing: 0.01em;
 }
-
-/* Mirrors the exact styling metrics of the existing form add button */
-.backup-btn {
-  padding: 0.8rem 1.5rem;
-  background-color: var(--accent);
-  color: #000000;
-  border: none;
-  border-radius: var(--border-radius);
-  font-weight: 600;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.backup-btn:hover {
-  background-color: var(--accent-hover);
-}
-
-/* Inline feedback message positioning */
-.status-msg {
-  font-size: 0.85rem;
-  margin: 0.75rem 0 0 0;
-  padding: 0.4rem;
-  border-radius: 6px;
-  text-align: center;
-}
-.status-msg.success { color: var(--success); background-color: rgba(3, 218, 198, 0.1); }
-.status-msg.error { color: var(--danger); background-color: rgba(207, 102, 121, 0.1); }
-.status-msg.info { color: var(--text-muted); background-color: rgba(255, 255, 255, 0.05); }
-.header-main-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  gap: 1rem;
-}
-
-.header-text-group {
-  text-align: left;
-  flex: 1;
-}
-
-/* Button Layout Group */
-.header-actions {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-/* Shared dimensions that match the Add button exactly */
-.backup-btn,
-.restore-btn {
-  padding: 0.8rem 1.2rem; /* Adjusted horizontal padding slightly to fit side-by-side cleanly */
-  border-radius: var(--border-radius);
-  font-weight: 600;
-  font-size: 1rem;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: var(--transition);
-  box-sizing: border-box;
-}
-
-/* Solid Fill Primary Accent style */
-.backup-btn {
-  background-color: var(--accent);
-  color: #000000;
-  border: none;
-}
-
-.backup-btn:hover {
-  background-color: var(--accent-hover);
-}
-
-/* Outline style to create clean visual balance */
-.restore-btn {
-  background-color: transparent;
-  border: 2px solid var(--accent);
-  color: var(--accent);
-}
-
-.restore-btn:hover {
-  background-color: var(--accent);
-  color: #000000;
-}
-
-/* Responsive adjustment for extra narrow smartphone viewports */
-@media(max-width: 400px) {
-  .header-main-row {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .header-actions {
-    width: 100%;
-    margin-top: 0.5rem;
-  }
-  .backup-btn, .restore-btn {
-    flex: 1;
-    text-align: center;
-  }
-}
-
 
 </style>
 
